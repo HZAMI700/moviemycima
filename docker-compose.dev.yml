@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: moviemycima-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - moviemycima-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: moviemycima-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - moviemycima-network
+
+volumes:
+  mongo-data:
+
+networks:
+  moviemycima-network:
+    driver: bridge

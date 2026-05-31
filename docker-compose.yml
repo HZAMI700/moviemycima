@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: moviemycima-mongo
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - moviemycima-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: moviemycima-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    networks:
+      - moviemycima-network
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: moviemycima-server
+    restart: unless-stopped
+    depends_on:
+      - mongo
+      - redis
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - MONGODB_URI=mongodb://mongo:27017/moviemycima
+      - REDIS_URI=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3000}
+    volumes:
+      - server-logs:/app/logs
+    networks:
+      - moviemycima-network
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: moviemycima-client
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:5000/api
+    networks:
+      - moviemycima-network
+
+volumes:
+  mongo-data:
+  redis-data:
+  server-logs:
+
+networks:
+  moviemycima-network:
+    driver: bridge
