@@ -1,4 +1,8 @@
-"""URL normalization, filtering, deduplication — strict media/skip-path rules."""
+"""URL normalization, filtering, and content-type classification.
+
+The crawler SKIPS certain paths to avoid dynamic/auth pages but the
+parser still extracts streaming/embed/download links found on pages.
+"""
 
 import re
 from urllib.parse import urlparse, urlunparse, urljoin
@@ -11,7 +15,7 @@ MEDIA_EXTENSIONS = frozenset({
     ".exe", ".iso", ".img",
 })
 
-BLOCKED_PATH_PATTERNS = re.compile(
+SKIP_PATH_PATTERNS = re.compile(
     r"/(watch|download|server|iframe|embed|player|stream|"
     r"ajax|api|login|register|signup|signin|logout|"
     r"account|profile|dashboard|admin|wp-admin|wp-login|"
@@ -21,7 +25,6 @@ BLOCKED_PATH_PATTERNS = re.compile(
 
 
 def normalize_url(url: str, base: str | None = None) -> str:
-    """Canonical URL: resolve relative, lowercase, sort query, strip fragment."""
     if base and not url.startswith(("http://", "https://", "ftp://")):
         url = urljoin(base, url)
     parsed = urlparse(url)
@@ -40,31 +43,29 @@ def is_same_domain(url: str, allowed_domains: list[str]) -> bool:
     return any(host == d or host.endswith("." + d) for d in allowed_domains)
 
 
-def is_media_url(url: str) -> bool:
+def is_media_file(url: str) -> bool:
     path = urlparse(url).path.lower()
     return any(path.endswith(ext) for ext in MEDIA_EXTENSIONS)
 
 
-def is_blocked_path(url: str) -> bool:
+def is_skip_path(url: str) -> bool:
     path = urlparse(url).path
-    return bool(BLOCKED_PATH_PATTERNS.search(path))
+    return bool(SKIP_PATH_PATTERNS.search(path))
 
 
 def should_crawl(url: str, allowed_domains: list[str]) -> tuple[bool, str]:
-    """Return (allowed, reason)."""
     if not url or url.startswith("#") or url.startswith("javascript:") or url.startswith("mailto:"):
         return False, "empty_or_js"
     if not is_same_domain(url, allowed_domains):
         return False, "different_domain"
-    if is_media_url(url):
+    if is_media_file(url):
         return False, "media_file"
-    if is_blocked_path(url):
-        return False, "blocked_path"
+    if is_skip_path(url):
+        return False, "skip_path"
     return True, "ok"
 
 
 def classify_url(url: str) -> str:
-    """Guess content type from URL path."""
     path = urlparse(url).path.lower()
     if re.search(r"/(movie|film|فيلم)/", path):
         return "movie"

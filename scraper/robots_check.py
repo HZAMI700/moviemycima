@@ -1,97 +1,89 @@
-"""robots.txt fetcher + parser + sitemap discovery via Scrapling."""
+"""robots.txt checker — fetches, parses, checks crawl permission.
+
+Uses httpx instead of Scrapling Fetcher to avoid heavy dependencies.
+"""
 
 import logging
-from urllib.parse import urljoin, urlparse
-from scrapling.fetchers import Fetcher
+from urllib.parse import urlparse, urljoin
+import httpx
+from scrapling.parser import Selector
 
 logger = logging.getLogger(__name__)
 
 
 class RobotsChecker:
-    def __init__(self, base_url: str, user_agent: str = "*"):
-        self.base_url = base_url.rstrip("/")
-        self.robots_url = urljoin(self.base_url, "/robots.txt")
+    def __init__(self, start_url: str, user_agent: str = "Mozilla/5.0 Scraper"):
+        parsed = urlparse(start_url)
+        self.base = f"{parsed.scheme}://{parsed.netloc}"
+        self.robots_url = urljoin(self.base, "/robots.txt")
+        self.user_agent = user_agent
+        self.is_allowed = True
+        self.crawl_delay: float | None = None
         self.sitemaps: list[str] = []
-        self._rules: list[tuple[str, str]] = []
-        self._crawl_delay: float | None = None
-        self._allowed = True
-        self._checked = False
-
-    @property
-    def is_allowed(self) -> bool:
-        return self._allowed
-
-    @property
-    def crawl_delay(self) -> float | None:
-        return self._crawl_delay
+        self._client = httpx.Client(timeout=15.0, follow_redirects=True)
 
     def check(self) -> bool:
-        if self._checked:
-            return self._allowed
-        self._checked = True
         try:
-            resp = Fetcher.get(self.robots_url, timeout=15)
-            if resp.status != 200:
-                logger.info("robots.txt HTTP %s — assuming full access", resp.status)
-                return True
-            self._parse(resp.text)
-            logger.info(
-                "robots.txt OK — %d rules, %d sitemap(s), delay=%s",
-                len(self._rules), len(self.sitemaps), self._crawl_delay,
+            resp = self._client.get(
+                self.robots_url,
+                headers={"User-Agent": self.user_agent},
             )
-            return True
+            if resp.status_code >= 400:
+                logger.info("robots.txt not found (%s) — assuming allowed", resp.status_code)
+                self.is_allowed = True
+                return True
+
+            body = resp.text or ""
+            lines = body.splitlines()
+            current_agent = None
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.lower().startswith("user-agent:"):
+                    current_agent = line.split(":", 1)[1].strip()
+                if current_agent is None:
+                    continue
+                if current_agent != "*" and current_agent.lower() not in self.user_agent.lower():
+                    continue
+                if line.lower().startswith("disallow:"):
+                    path = line.split(":", 1)[1].strip()
+                    if path:
+                        self.is_allowed = False
+                if line.lower().startswith("crawl-delay:"):
+                    try:
+                        self.crawl_delay = float(line.split(":", 1)[1].strip())
+                    except ValueError:
+                        pass
+                if line.lower().startswith("sitemap:"):
+                    url = line.split(":", 1)[1].strip()
+                    if url:
+                        self.sitemaps.append(url)
+
+            logger.info("robots.txt: allowed=%s, delay=%s, sitemaps=%d", self.is_allowed, self.crawl_delay, len(self.sitemaps))
+            return self.is_allowed
         except Exception as e:
-            logger.warning("robots.txt fetch failed (%s) — allowing crawl", e)
+            logger.warning("robots.txt fetch failed (%s) — assuming allowed", e)
+            self.is_allowed = True
             return True
-
-    def _parse(self, text: str):
-        current_agents: list[str] = []
-        for raw in text.splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ":" not in line:
-                continue
-            key, _, val = line.partition(":")
-            key, val = key.strip().lower(), val.strip()
-            if key == "user-agent":
-                current_agents = [val.lower()] if val != "*" else ["*"]
-            elif key == "disallow":
-                if current_agents:
-                    self._rules.append(("disallow", val))
-            elif key == "allow":
-                if current_agents:
-                    self._rules.append(("allow", val))
-            elif key == "crawl-delay" and current_agents and ("*" in current_agents):
-                try:
-                    self._crawl_delay = float(val)
-                except ValueError:
-                    pass
-            elif key == "sitemap":
-                self.sitemaps.append(val)
-
-    def is_url_allowed(self, url: str) -> bool:
-        path = urlparse(url).path or "/"
-        matched = None
-        for rule_type, rule_path in self._rules:
-            if path.startswith(rule_path):
-                matched = (rule_type, rule_path)
-        if matched is None:
-            return True
-        return matched[0] == "allow"
 
     def find_sitemap(self) -> list[str]:
-        self.check()
         if self.sitemaps:
             return self.sitemaps
-        for path in ["/sitemap.xml", "/sitemap_index.xml"]:
+        for path in ["/sitemap.xml", "/sitemap_index.xml", "/sitemap/sitemap.xml"]:
+            url = urljoin(self.base, path)
             try:
-                url = urljoin(self.base_url, path)
-                resp = Fetcher.get(url, timeout=15)
-                if resp.status == 200:
-                    self.sitemaps.append(url)
-                    logger.info("Discovered sitemap: %s", url)
-                    break
-            except Exception:
-                continue
-        return self.sitemaps
+                resp = self._client.get(url, headers={"User-Agent": self.user_agent})
+                if 200 <= resp.status_code < 400:
+                    sel = Selector((resp.text or "").encode("utf-8"))
+                    locs = sel.css("loc::text").getall()
+                    if locs:
+                        logger.info("Found sitemap at %s with %d URLs", url, len(locs))
+                        return [url]
+                    nested = sel.css("sitemap loc::text").getall()
+                    if nested:
+                        logger.info("Found sitemap index at %s", url)
+                        return nested
+            except Exception as e:
+                logger.debug("Sitemap check %s failed: %s", url, e)
+        return []

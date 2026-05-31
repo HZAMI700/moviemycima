@@ -1,22 +1,29 @@
-"""HTML metadata parser — JSON-LD → OpenGraph → Twitter → CSS/XPath fallback."""
+"""HTML metadata parser — JSON-LD → OpenGraph → Twitter → CSS/XPath fallback.
+
+Extracts both standard metadata AND streaming/embed/download URLs found
+on movie/series detail pages.
+"""
 
 import json
 import re
+import hashlib
 import logging
 from datetime import datetime, timezone
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from scrapling.parser import Selector
 
 logger = logging.getLogger(__name__)
 
 
-def parse_metadata(html: str, page_url: str) -> dict | None:
-    """Extract public metadata. Returns dict or None."""
+def parse_metadata(html: str | bytes, page_url: str) -> dict | None:
+    if isinstance(html, str):
+        html = html.encode("utf-8")
     sel = Selector(html)
     result: dict = {
+        "id": _make_id(page_url),
         "page_url": page_url,
-        "source_domain": _extract_domain(page_url),
+        "source_domain": urlparse(page_url).hostname or "",
         "discovered_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -24,13 +31,44 @@ def parse_metadata(html: str, page_url: str) -> dict | None:
     _parse_opengraph(sel, result)
     _parse_twitter(sel, result)
     _parse_fallback(sel, page_url, result)
+
+    _extract_media_links(sel, page_url, result)
+
     _clean_result(result)
-    return result if result.get("title") else None
+    content_type = result.get("type") or classify_from_url(page_url)
+    result.setdefault("type", content_type)
+
+    if not result.get("title"):
+        return None
+
+    result.setdefault("content_type", result.pop("type", "page"))
+    result.setdefault("updated_at", result["discovered_at"])
+    result.setdefault("genres", [])
+    result.setdefault("cast", [])
+    result.setdefault("streaming_urls", [])
+    result.setdefault("download_urls", [])
+    result.setdefault("embed_urls", [])
+    result.setdefault("subtitle_urls", [])
+
+    return result
 
 
-def _extract_domain(url: str) -> str:
-    from urllib.parse import urlparse
-    return urlparse(url).hostname or ""
+def _make_id(page_url: str) -> str:
+    raw = page_url.rstrip("/").lower()
+    return hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+
+def classify_from_url(page_url: str) -> str:
+    path = urlparse(page_url).path.lower()
+    if re.search(r"/(movie|film|فيلم)/", path):
+        return "movie"
+    if re.search(r"/(series?|tv|show|مسلسل)/", path):
+        return "series"
+    if re.search(r"/(episode|حلقة)/", path):
+        return "episode"
+    if re.search(r"/(category|genre|تصنيف|قسم)/", path):
+        return "category"
+    return "page"
 
 
 def _parse_json_ld(sel: Selector, result: dict):
@@ -104,10 +142,7 @@ def _extract_ld(item: dict, result: dict):
                     names.append(v)
             names = [n for n in names if n]
             if names:
-                if field == "director":
-                    result.setdefault("director", names[0])
-                else:
-                    result.setdefault("cast", names)
+                result.setdefault(field, names[0] if field == "director" else names)
         elif isinstance(vals, dict):
             name = vals.get("name")
             if name:
@@ -151,6 +186,87 @@ def _parse_twitter(sel: Selector, result: dict):
         val = sel.css(f'meta[name="{prop}"]::attr(content)').get()
         if val:
             result.setdefault(field, val)
+
+
+def _extract_media_links(sel: Selector, page_url: str, result: dict):
+    """Extract streaming, embed, download, and subtitle URLs from the page."""
+    base = page_url.rsplit("/", 1)[0] if "/" in page_url else page_url
+
+    # 1) iframe embeds
+    iframes = sel.css("iframe::attr(src)").getall()
+    embed_urls = []
+    for src in iframes:
+        if src and src.strip():
+            abs_url = urljoin(base, src.strip())
+            embed_urls.append(abs_url)
+    if embed_urls:
+        result.setdefault("embed_urls", embed_urls)
+
+    # 2) embed tags
+    embeds = sel.css("embed::attr(src)").getall()
+    for src in embeds:
+        if src and src.strip():
+            abs_url = urljoin(base, src.strip())
+            if abs_url not in result.get("embed_urls", []):
+                result.setdefault("embed_urls", []).append(abs_url)
+
+    # 3) video / source tags
+    video_srcs = sel.css("video source::attr(src)").getall()
+    video_srcs += sel.css("video::attr(src)").getall()
+    streaming_urls = []
+    for src in video_srcs:
+        if src and src.strip():
+            abs_url = urljoin(base, src.strip())
+            streaming_urls.append(abs_url)
+    if streaming_urls:
+        result.setdefault("streaming_urls", streaming_urls)
+
+    # 4) m3u8 / mp4 direct links in data attributes
+    for attr in ["data-src", "data-url", "data-link", "href"]:
+        els = sel.css(f"[{attr}]")
+        for el in els:
+            val = el.css(f"::attr({attr})").get()
+            if val and (".m3u8" in val.lower() or ".mp4" in val.lower()):
+                abs_url = urljoin(base, val.strip())
+                if abs_url not in result.get("streaming_urls", []):
+                    result.setdefault("streaming_urls", []).append(abs_url)
+
+    # 5) Download links
+    download_els = sel.css('a[download], [class*="download"] a, a[href*="download"]')
+    download_urls = []
+    for el in download_els:
+        href = el.css("::attr(href)").get()
+        if href and href.strip():
+            abs_url = urljoin(base, href.strip())
+            download_urls.append(abs_url)
+    if download_urls:
+        result.setdefault("download_urls", download_urls)
+
+    # 6) Watch-server links
+    server_els = sel.css('[class*="server"] a, [class*="watch"] a, [id*="server"] a')
+    server_urls = []
+    for el in server_els:
+        href = el.css("::attr(href)").get()
+        if href and href.strip():
+            abs_url = urljoin(base, href.strip())
+            if abs_url not in result.get("embed_urls", []):
+                server_urls.append(abs_url)
+    if server_urls:
+        result.setdefault("embed_urls", result.get("embed_urls", []) + server_urls)
+
+    # 7) Subtitle / track
+    tracks = sel.css("track::attr(src)").getall()
+    for src in tracks:
+        if src and src.strip():
+            abs_url = urljoin(base, src.strip())
+            result.setdefault("subtitle_urls", []).append(abs_url)
+    sub_links = sel.css('[class*="subtitle"] a, [class*="sub"] a, a[href*=".vtt"], a[href*=".srt"]')
+    for el in sub_links:
+        href = el.css("::attr(href)").get()
+        if href and href.strip():
+            abs_url = urljoin(base, href.strip())
+            if abs_url not in result.get("subtitle_urls", []):
+                result.setdefault("subtitle_urls", []).append(abs_url)
 
 
 def _parse_fallback(sel: Selector, page_url: str, result: dict):
@@ -257,10 +373,6 @@ def _parse_fallback(sel: Selector, page_url: str, result: dict):
             result["breadcrumbs"] = crumbs
             result.setdefault("category", crumbs[-1] if len(crumbs) > 1 else crumbs[0])
 
-    if not result.get("type"):
-        from scraper.url_filters import classify_url
-        result["type"] = classify_url(page_url)
-
 
 def _safe_float(val) -> float | None:
     try:
@@ -291,10 +403,9 @@ def _format_duration(iso: str) -> str:
 
 
 def _clean_result(result: dict):
-    """Remove empty / None fields and trim strings."""
     for k in list(result.keys()):
         v = result[k]
         if v is None or v == "" or v == []:
             del result[k]
         elif isinstance(v, str):
-            result[k] = v.strip()[:2000]
+            result[k] = v.strip()[:5000]

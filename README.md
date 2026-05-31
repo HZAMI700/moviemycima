@@ -1,19 +1,63 @@
-# WeCima Metadata Crawler
+# WeCima No-Backend Scraper
 
-Metadata-only web crawler for [wecima.bid](https://wecima.bid) built with [Scrapling](https://github.com/D4Vinci/Scrapling).
+A **no-backend** metadata scraper that runs via **GitHub Actions**, extracts movie/series metadata from wecima.bid, and saves static JSON files that your frontend reads directly.
 
-Extracts **only public metadata** — titles, genres, ratings, descriptions, cast. Never downloads media, streaming URLs, embed links, or protected content.
+**No backend server required.** No database. No API. Just static JSON served from `public/data/`.
 
-## Legal & Ethical Limits
+---
 
-**This crawler is metadata-only and:**
-- Does **not** extract watching servers, downloading servers, iframe/embed/player URLs, m3u8, mp4, ts, subtitles, or direct media links
-- Does **not** bypass Cloudflare, captchas, anti-bot systems, paywalls, or login walls
-- Does **not** download posters, images, videos, or subtitles
-- **Respects robots.txt** — stops if crawling is disallowed
-- Uses polite delays (2–5s) and a clear User-Agent
+## Architecture
 
-**You are responsible** for complying with the target website's ToS and your local laws.
+```
+┌─────────────────────┐     ┌─────────────────────┐     ┌──────────────────────┐
+│  GitHub Actions     │ ──► │  client/public/data │ ──► │  Next.js Frontend    │
+│  (every 6 hours)    │     │  ├─ catalog.json     │     │  reads /data/*.json  │
+│                     │     │  ├─ movies.json      │     │  directly via fetch  │
+│  python -m scraper  │     │  ├─ series.json      │     │                      │
+│         .crawler    │     │  ├─ latest.json      │     │  npm run dev →       │
+│                     │     │  └─ search-index.json │     │  localhost:3000      │
+└─────────────────────┘     └─────────────────────┘     └──────────────────────┘
+```
+
+- The scraper runs as a **GitHub Action** every 6 hours or on demand.
+- It crawls wecima.bid, extracts metadata (title, year, genres, cast, poster, **streaming URLs**, **embed URLs**, **download URLs**, **subtitle URLs**, etc.).
+- Output is written to `client/public/data/*.json`.
+- The Action **commits changes** back to the repo automatically.
+- The Next.js frontend fetches JSON straight from `/data/*.json` — zero backend.
+
+---
+
+## Files
+
+```
+├── .github/workflows/scrape.yml    # GitHub Action — runs every 6h
+├── scraper/
+│   ├── __init__.py
+│   ├── config.py                   # Configuration & CLI/Env overrides
+│   ├── crawler.py                  # Main entry point (CLI)
+│   ├── parser.py                   # 4-layer parser + media link extraction
+│   ├── robots_check.py             # robots.txt checker
+│   ├── storage.py                  # Writes merged JSON to public/data/
+│   ├── url_filters.py              # URL normalization & path filtering
+│   └── utils.py                    # Helpers (delay, backoff, ID gen)
+├── client/public/data/             # Output JSON files (auto-generated)
+│   ├── catalog.json                # All scraped items
+│   ├── movies.json                 # Movies only
+│   ├── series.json                 # Series only
+│   ├── latest.json                 # Newest 20 items
+│   └── search-index.json           # Lightweight search data
+├── client/src/lib/staticData.ts    # Frontend loader helpers
+├── client/src/components/static/   # Example React components
+│   ├── StaticMovieGrid.tsx
+│   ├── StaticSeriesGrid.tsx
+│   ├── SearchBar.tsx
+│   └── LatestSection.tsx
+├── requirements.txt
+├── .env.example
+└── README.md
+```
+
+---
 
 ## Installation
 
@@ -21,138 +65,168 @@ Extracts **only public metadata** — titles, genres, ratings, descriptions, cas
 pip install -r requirements.txt
 ```
 
-Optional (for stealth fetcher features):
-```bash
-pip install "scrapling[fetchers]"
-```
+---
 
-## Usage
+## Run the Scraper Locally
 
-### Basic crawl (sitemap-first, then BFS)
 ```bash
+# Default: 500 pages, depth 3
 python -m scraper.crawler
-```
 
-### Custom limits
-```bash
-python -m scraper.crawler --max-pages 200 --max-depth 3
-```
+# Custom limits
+python -m scraper.crawler --max-pages 200 --max-depth 2
 
-### Use a specific sitemap
-```bash
+# Use sitemap directly
 python -m scraper.crawler --sitemap https://wecima.bid/sitemap.xml
+
+# Verbose logging
+python -m scraper.crawler --verbose
+
+# Custom output directory
+python -m scraper.crawler --output-dir client/public/data
 ```
 
-### All options
-```
---start-url     Starting URL (default: https://wecima.bid)
---max-pages     Maximum pages to crawl (default: 500)
---max-depth     Maximum crawl depth (default: 3)
---delay         Base delay in seconds (default: 3)
---sitemap       Sitemap URL (skips homepage discovery)
---output        JSONL output path
---csv           CSV output path
---no-sqlite     Disable SQLite storage
---verbose       Enable debug logging
+Output is written to `client/public/data/*.json`. Run `npm run dev` in `client/` to preview.
+
+---
+
+## Run via GitHub Actions
+
+### Manual trigger
+1. Go to **Actions** → **Scrape WeCima.bid** → **Run workflow**.
+2. Optionally set `max_pages` and `max_depth`.
+3. Click **Run workflow**.
+
+### Automatic schedule
+The workflow runs **every 6 hours** automatically. It commits updated JSON files to the repo. If no data changed, no commit is made.
+
+---
+
+## How the Frontend Connects
+
+The scraper outputs JSON into `client/public/data/`. Next.js serves files in `public/` at the root, so `/data/catalog.json` is available at `http://localhost:3000/data/catalog.json` (or your production domain).
+
+### Helper functions (`client/src/lib/staticData.ts`)
+
+```ts
+import { loadMovies, loadSeries, loadLatest, searchCatalog } from '@/lib/staticData';
+
+// All movies
+const { items, total } = await loadMovies();
+
+// All series
+const series = await loadSeries();
+
+// Latest 20 items
+const latest = await loadLatest();
+
+// Client-side search
+const results = await searchCatalog('search query');
 ```
 
-## Output
+### Example components
 
-### JSONL (one object per line)
-```json
-{
-  "page_url": "https://wecima.bid/movie/example",
-  "title": "Example Movie",
-  "original_title": "Original Title",
-  "type": "movie",
-  "year": 2024,
-  "genres": ["Action", "Drama"],
-  "language": "Arabic",
-  "country": "US",
-  "quality": "1080p",
-  "rating": 8.5,
-  "duration": "2h 15m",
-  "description": "Movie description...",
-  "cast": ["Actor One", "Actor Two"],
-  "director": "Director Name",
-  "category": "أفلام أجنبية",
-  "breadcrumbs": ["الرئيسية", "أفلام", "أجنبي"],
-  "poster_image_url": "https://cdn.example/poster.jpg",
-  "source_domain": "wecima.bid",
-  "discovered_at": "2025-05-31T20:30:00Z"
+```tsx
+import StaticMovieGrid from '@/components/static/StaticMovieGrid';
+import StaticSeriesGrid from '@/components/static/StaticSeriesGrid';
+import LatestSection from '@/components/static/LatestSection';
+import SearchBar from '@/components/static/SearchBar';
+
+export default function HomePage() {
+  return (
+    <div>
+      <SearchBar />
+      <LatestSection limit={10} />
+      <StaticMovieGrid limit={24} />
+      <StaticSeriesGrid limit={24} />
+    </div>
+  );
 }
 ```
 
-### SQLite
-Table `metadata` with same fields. `page_url` is UNIQUE.
+---
 
-### CSV
-Exported at end of crawl.
+## Data Format
 
-## Project Structure
+Each JSON file follows this structure:
 
+```json
+{
+  "total": 150,
+  "updated_at": "2026-05-31T12:00:00Z",
+  "items": [
+    {
+      "id": "a1b2c3d4e5f6",
+      "title": "Example Movie",
+      "original_title": "Original Title",
+      "content_type": "movie",
+      "page_url": "https://wecima.bid/movie/example",
+      "year": 2024,
+      "genres": ["أكشن", "دراما"],
+      "language": "العربية",
+      "country": "مصر",
+      "quality": "HD",
+      "rating": 7.5,
+      "duration": "2h 10m",
+      "description": "Movie description...",
+      "cast": ["Actor 1", "Actor 2"],
+      "director": "Director Name",
+      "poster_image_url": "https://example.com/poster.jpg",
+      "streaming_urls": ["https://example.com/stream.m3u8"],
+      "download_urls": ["https://example.com/download.mp4"],
+      "embed_urls": ["https://example.com/embed"],
+      "subtitle_urls": ["https://example.com/sub.vtt"],
+      "breadcrumbs": ["الرئيسية", "أفلام", "أكشن"],
+      "category": "أكشن",
+      "source_domain": "wecima.bid",
+      "discovered_at": "2026-05-31T12:00:00Z",
+      "updated_at": "2026-05-31T12:00:00Z"
+    }
+  ]
+}
 ```
-scraper/
-├── __init__.py        # Package marker
-├── config.py          # Configuration from .env + CLI
-├── robots_check.py    # robots.txt & sitemap checker
-├── url_filters.py     # URL normalization & filtering
-├── parser.py          # 4-layer parser (JSON-LD → OG → Twitter → CSS/XPath)
-├── storage.py         # JSONL + CSV + SQLite
-├── crawler.py         # CLI entry point (sitemap or BFS)
-├── utils.py           # Delay & retry helpers
-data/
-├── output.jsonl
-├── output.csv
-└── metadata.sqlite
-tests/
-├── test_scraper.py    # 18 tests
-└── fixtures/
-    └── movie_page.html
-```
 
-## Fields Extracted
+`search-index.json` contains only lightweight fields: `id`, `title`, `original_title`, `titleAr`, `content_type`, `year`, `poster_image_url`, `page_url`, `genres`.
 
-| Field            | Source                                    |
-|------------------|-------------------------------------------|
-| title            | JSON-LD → OG → Twitter → h1 / title      |
-| original_title   | JSON-LD `alternativeName`                 |
-| type             | JSON-LD → URL pattern                     |
-| year             | JSON-LD `datePublished` → CSS             |
-| genres           | JSON-LD `genre` → `.genres a`             |
-| language         | OG `locale` → `.language` CSS             |
-| country          | `.country` CSS                            |
-| quality          | `.quality` CSS                            |
-| rating           | JSON-LD `aggregateRating` → `.rating`     |
-| duration         | JSON-LD `duration` (ISO→human) → CSS      |
-| description      | JSON-LD → OG → meta description           |
-| cast             | JSON-LD `actor` → `.cast a`               |
-| director         | JSON-LD `director` → `.director a`        |
-| category         | Breadcrumbs → OG site_name                |
-| breadcrumbs      | BreadcrumbList JSON-LD → `.breadcrumb li` |
-| poster_image_url | JSON-LD `image` → OG:image → CSS img src  |
-| source_domain    | Parsed from `page_url`                    |
-| discovered_at    | UTC timestamp                             |
+---
 
-## URL Filtering Rules
+## Legal Limitations
 
-**Skipped paths:** `/watch`, `/download`, `/server`, `/iframe`, `/embed`, `/player`, `/stream`, `/ajax`, `/api`, `/login`, `/register`, `/account`, `/admin`, `/wp-admin`, etc.
+- This scraper extracts **publicly available metadata** from wecima.bid.
+- It **respects robots.txt** and stops if crawling is disallowed.
+- It includes **polite delays** (2–5 seconds between requests).
+- It does **not** bypass Cloudflare, CAPTCHA, login, or any protection.
+- Streaming/embed/download URLs are extracted **as metadata only** — they are public links found on the page, not generated or bypassed.
+- This tool is for **personal/educational use** only. Check the target site's Terms of Service before scraping.
 
-**Skipped extensions:** `.mp4`, `.m3u8`, `.ts`, `.srt`, `.vtt`, `.mp3`, `.zip`, `.rar`, `.avi`, `.mkv`, `.mov`, `.wmv`, `.flv`, `.webm`
+---
 
-**Domain-restricted:** Only follows links on `wecima.bid`.
+## Troubleshooting
 
-## Testing
+| Problem | Solution |
+|---------|----------|
+| `ModuleNotFoundError: No module named 'scrapling'` | Run `pip install -r requirements.txt` |
+| `robots.txt blocks crawling` | The site's robots.txt disallows. Respect it. |
+| `HTTP 429 Too Many Requests` | Increase delay: `--delay 5` |
+| `No metadata extracted` | The site may have changed its HTML structure. Check the parser selectors in `parser.py`. |
+| `GitHub Action not committing` | Verify `Actions > General > Workflow permissions` has **Read and write permissions** enabled. |
+| `GitHub Action fails on Python` | Ensure `requirements.txt` is in the repo root and the action can install it. |
+| `Frontend shows empty data` | Run the scraper locally first to populate `client/public/data/`. |
+
+---
+
+## Commands Summary
 
 ```bash
-python -m pytest tests/test_scraper.py -v
+# Install
+pip install -r requirements.txt
+
+# Run locally
+python -m scraper.crawler --max-pages 200
+
+# Run with sitemap
+python -m scraper.crawler --sitemap https://wecima.bid/sitemap.xml
+
+# Preview frontend
+cd client && npm run dev
 ```
-
-All 18 tests pass.
-
-## Limitations
-
-- WeCima may change its HTML structure — the parser uses 4 fallback layers to stay resilient.
-- Some pages may lack certain fields (director, original title, country).
-- Cloudflare may block Scrapling's basic fetcher; the tool falls back gracefully.
-- Metadata quality depends on what the site exposes on public pages.

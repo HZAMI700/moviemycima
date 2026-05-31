@@ -1,4 +1,4 @@
 scrapling>=0.4.8
+httpx>=0.28.0
 lxml>=6.1.0
 cssselect>=1.4.0
-orjson>=3.11.8

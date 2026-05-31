@@ -1,4 +1,4 @@
-"""Configuration: environment variables + CLI args."""
+"""Configuration for the no-backend GitHub-Actions-powered scraper."""
 
 import os
 import json
@@ -13,9 +13,7 @@ class Config:
     max_depth: int = 3
     delay_min: float = 2.0
     delay_max: float = 5.0
-    output_jsonl: str = "data/output.jsonl"
-    output_csv: str = "data/output.csv"
-    output_sqlite: str = "data/metadata.sqlite"
+    output_dir: str = "client/public/data"
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -24,7 +22,8 @@ class Config:
     allowed_domains: list = field(default_factory=lambda: ["wecima.bid"])
     sitemap_url: str | None = None
     verbose: bool = False
-    no_sqlite: bool = False
+    concurrency: int = 1
+    retry_attempts: int = 3
 
     @classmethod
     def from_env_and_args(cls, cli_args: dict | None = None) -> "Config":
@@ -44,10 +43,9 @@ class Config:
             "MAX_DEPTH": "max_depth",
             "REQUEST_DELAY_MIN": "delay_min",
             "REQUEST_DELAY_MAX": "delay_max",
-            "OUTPUT_JSONL": "output_jsonl",
-            "OUTPUT_CSV": "output_csv",
-            "OUTPUT_SQLITE": "output_sqlite",
+            "OUTPUT_DIR": "output_dir",
             "USER_AGENT": "user_agent",
+            "CONCURRENCY": "concurrency",
         }
         for env_key, attr in _map.items():
             val = os.environ.get(env_key)
@@ -62,7 +60,3 @@ class Config:
                 if val is not None and hasattr(cfg, key):
                     setattr(cfg, key, val)
         return cfg
-
-    def ensure_dirs(self):
-        for p in [self.output_jsonl, self.output_csv, self.output_sqlite]:
-            Path(p).parent.mkdir(parents=True, exist_ok=True)
