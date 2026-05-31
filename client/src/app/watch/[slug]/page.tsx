@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { Suspense, useState, useEffect, useRef } from 'react';
 import { useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
@@ -9,7 +9,7 @@ import { HiPlay, HiPause, HiArrowsExpand, HiX, HiDesktopComputer, HiCog, HiChevr
 import { moviesAPI, seriesAPI, historyAPI } from '@/lib/api';
 import { useAuthStore } from '@/store/useAuthStore';
 
-export default function WatchPage() {
+function WatchContent() {
   const { slug } = useParams();
   const searchParams = useSearchParams();
   const [item, setItem] = useState<any>(null);
@@ -177,5 +177,13 @@ export default function WatchPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function WatchPage() {
+  return (
+    <Suspense fallback={<div className="fixed inset-0 bg-black z-50 flex items-center justify-center"><div className="w-12 h-12 border-4 border-primary-500 border-t-transparent rounded-full animate-spin" /></div>}>
+      <WatchContent />
+    </Suspense>
   );
 }

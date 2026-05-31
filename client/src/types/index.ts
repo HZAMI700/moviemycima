@@ -62,6 +62,7 @@ export interface Genre {
   nameAr: string;
   slug: string;
   image: string;
+  description?: string;
 }
 
 export interface Actor {
@@ -72,6 +73,7 @@ export interface Actor {
   image: string;
   bio: string;
   bioAr: string;
+  nationality?: string;
 }
 
 export interface User {

@@ -1,13 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { Suspense, useState, useEffect } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
 import MovieGrid from '@/components/movie/MovieGrid';
 import { moviesAPI, genresAPI } from '@/lib/api';
 import type { Movie, Genre } from '@/types';
 
-export default function MoviesPage() {
+function MoviesContent() {
   const searchParams = useSearchParams();
   const [movies, setMovies] = useState<Movie[]>([]);
   const [genres, setGenres] = useState<Genre[]>([]);
@@ -82,5 +82,13 @@ export default function MoviesPage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function MoviesPage() {
+  return (
+    <Suspense fallback={<div className="pt-24 text-center"><div className="w-12 h-12 border-4 border-primary-500 border-t-transparent rounded-full animate-spin mx-auto" /></div>}>
+      <MoviesContent />
+    </Suspense>
   );
 }
