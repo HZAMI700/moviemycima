@@ -1,4 +1,4 @@
-"""Configuration loader: environment variables + CLI args."""
+"""Configuration: environment variables + CLI args."""
 
 import os
 import json
@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 @dataclass
 class Config:
     start_url: str = "https://wecima.bid"
-    max_pages: int = 100
-    max_depth: int = 2
+    max_pages: int = 500
+    max_depth: int = 3
     delay_min: float = 2.0
     delay_max: float = 5.0
     output_jsonl: str = "data/output.jsonl"
@@ -29,8 +29,6 @@ class Config:
     @classmethod
     def from_env_and_args(cls, cli_args: dict | None = None) -> "Config":
         cfg = cls()
-
-        # Load from .env if present
         env_path = Path(".env")
         if env_path.exists():
             for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -38,10 +36,8 @@ class Config:
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 key, val = line.split("=", 1)
-                key, val = key.strip(), val.strip().strip('"').strip("'")
-                os.environ.setdefault(key, val)
+                os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
 
-        # Override from env
         _map = {
             "START_URL": "start_url",
             "MAX_PAGES": "max_pages",
@@ -57,16 +53,14 @@ class Config:
             val = os.environ.get(env_key)
             if val is not None:
                 try:
-                    setattr(cfg, attr, json.loads(val) if val.replace(".", "", 1).isdigit() else val)
+                    setattr(cfg, attr, json.loads(val) if val.replace(".", "", 1).replace("-", "", 1).isdigit() else val)
                 except (json.JSONDecodeError, ValueError):
                     setattr(cfg, attr, val)
 
-        # Override from CLI args
         if cli_args:
             for key, val in cli_args.items():
                 if val is not None and hasattr(cfg, key):
                     setattr(cfg, key, val)
-
         return cfg
 
     def ensure_dirs(self):

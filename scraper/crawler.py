@@ -1,5 +1,11 @@
-# flake8: noqa: E402
-"""WeCima metadata crawler — CLI entry point."""
+#!/usr/bin/env python3
+"""WeCima Metadata Crawler — CLI entry point.
+
+Usage:
+    python -m scraper.crawler
+    python -m scraper.crawler --max-pages 200 --max-depth 3
+    python -m scraper.crawler --sitemap https://wecima.bid/sitemap.xml
+"""
 
 import sys
 import logging
@@ -7,122 +13,128 @@ import argparse
 import random
 import time
 from pathlib import Path
-from urllib.parse import urljoin
 
-# Ensure project root is on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scrapling.fetchers import Fetcher
+from scrapling.parser import Selector
 
 from scraper.config import Config
 from scraper.robots_check import RobotsChecker
+from scraper.url_filters import normalize_url, should_crawl
 from scraper.parser import parse_metadata
 from scraper.storage import Storage
-from scraper.utils import normalize_url, should_crawl, extract_content_type_from_url
+from scraper import utils as scraper_utils
 
 logger = logging.getLogger("scraper")
 
 
 def setup_logging(verbose: bool = False):
     level = logging.DEBUG if verbose else logging.INFO
-    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    logging.basicConfig(level=level, format=fmt, datefmt="%H:%M:%S")
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
 
 def fetch_page(url: str, config: Config) -> tuple[str | None, int]:
-    """Fetch page HTML using Scrapling's Fetcher. Returns (html, status) or (None, status)."""
-    try:
-        resp = Fetcher.get(
-            url,
-            timeout=30,
-            stealthy_headers=True,
-            headers={"User-Agent": config.user_agent},
-        )
-        if resp.status and 200 <= resp.status < 400:
-            return resp.text, resp.status
-        logger.warning("HTTP %d for %s", resp.status, url)
-        return None, resp.status or 0
-    except Exception as e:
-        logger.error("Fetch error for %s: %s", url, e)
-        return None, 0
+    """Fetch page HTML. Returns (html, status_code)."""
+    for attempt in range(3):
+        try:
+            resp = Fetcher.get(
+                url,
+                timeout=30,
+                stealthy_headers=True,
+                headers={"User-Agent": config.user_agent},
+            )
+            if resp.status and 200 <= resp.status < 400:
+                return resp.text, resp.status
+            if resp.status in (429, 503):
+                wait = scraper_utils.exponential_backoff(attempt)
+                logger.warning("HTTP %d for %s — retrying in %.1fs", resp.status, url, wait)
+                time.sleep(wait)
+                continue
+            logger.warning("HTTP %d for %s", resp.status, url)
+            return None, resp.status or 0
+        except Exception as e:
+            wait = scraper_utils.exponential_backoff(attempt)
+            logger.error("Fetch error for %s (attempt %d/3): %s — waiting %.1fs", url, attempt + 1, e, wait)
+            time.sleep(wait)
+    return None, 0
 
 
-def crawl_sitemap(urls: list[str], config: Config, storage: Storage):
-    """Crawl discovered sitemap URLs."""
+def crawl_sitemap(urls: list[str], config: Config, storage: Storage) -> int:
+    """Extract URLs from sitemap XML, then crawl each one."""
     visited: set[str] = set()
     count = 0
+    hrefs: set[str] = set()
 
-    for url in urls:
-        if config.max_pages and count >= config.max_pages:
-            break
-        normalized = normalize_url(url)
-        if normalized in visited:
-            continue
-
-        logger.info("Sitemap URL: %s", url)
-        # Fetch sitemap XML, parse <loc> tags
-        html, status = fetch_page(url, config)
+    for sitemap_url in urls:
+        html, status = fetch_page(sitemap_url, config)
         if not html:
             continue
-        from scrapling.parser import Selector
         sel = Selector(html)
         locs = sel.css("loc::text").getall()
         if not locs:
             locs = sel.css("sitemap loc::text").getall()
-
         for loc in locs:
-            if config.max_pages and count >= config.max_pages:
-                break
-            loc = loc.strip()
-            normalized = normalize_url(loc)
-            if normalized in visited:
-                continue
-            visited.add(normalized)
+            hrefs.add(loc.strip())
 
-            allowed, reason = should_crawl(loc, config.allowed_domains)
-            if not allowed:
-                logger.debug("Skip %s: %s", loc, reason)
-                continue
+    logger.info("Found %d URLs in sitemap", len(hrefs))
 
-            time.sleep(random.uniform(config.delay_min, config.delay_max))
-            html2, status2 = fetch_page(loc, config)
-            if not html2:
-                continue
+    for loc in hrefs:
+        if config.max_pages and count >= config.max_pages:
+            break
+        normalized = normalize_url(loc)
+        if normalized in visited:
+            continue
+        visited.add(normalized)
 
-            meta = parse_metadata(html2, loc)
-            if meta:
-                storage.save(meta)
-                count += 1
-                logger.info("Extracted [%d/%d] %s — %s", count, config.max_pages, meta.get("content_type", "?"), meta.get("title", loc))
+        allowed, reason = should_crawl(normalized, config.allowed_domains)
+        if not allowed:
+            logger.debug("Skipped %s: %s", normalized, reason)
+            continue
+
+        scraper_utils.random_delay(config.delay_min, config.delay_max)
+        html, status = fetch_page(normalized, config)
+        if not html:
+            continue
+
+        meta = parse_metadata(html, normalized)
+        if meta:
+            storage.save(meta)
+            count += 1
+            logger.info("[%d/%d] %s — %s", count, config.max_pages or "∞", meta.get("type", "?"), meta.get("title", normalized))
+        else:
+            logger.debug("No metadata on %s", normalized)
 
     return count
 
 
-def crawl_homepage(config: Config, storage: Storage):
-    """BFS crawl from home page, following internal links."""
+def crawl_bfs(config: Config, storage: Storage) -> int:
+    """BFS crawl from start_url following internal links."""
     visited: set[str] = set()
     queue: list[tuple[str, int]] = [(normalize_url(config.start_url), 0)]
     count = 0
 
-    logger.info("Starting BFS crawl from %s", config.start_url)
+    logger.info("BFS crawl from %s (max_depth=%s)", config.start_url, config.max_depth)
 
     while queue and (not config.max_pages or count < config.max_pages):
         url, depth = queue.pop(0)
         if url in visited:
             continue
         if config.max_depth and depth > config.max_depth:
-            logger.debug("Max depth reached for %s", url)
             continue
 
         allowed, reason = should_crawl(url, config.allowed_domains)
         if not allowed:
-            logger.debug("Skip %s: %s", url, reason)
             visited.add(url)
+            logger.debug("Skip %s: %s", url, reason)
             continue
-
         visited.add(url)
-        time.sleep(random.uniform(config.delay_min, config.delay_max))
 
+        scraper_utils.random_delay(config.delay_min, config.delay_max)
         html, status = fetch_page(url, config)
         if not html:
             continue
@@ -131,117 +143,110 @@ def crawl_homepage(config: Config, storage: Storage):
         if meta:
             storage.save(meta)
             count += 1
-            logger.info(
-                "FOUND [%d/%d] %s — %s (depth=%d)",
-                count, config.max_pages,
-                meta.get("content_type", "?"),
-                meta.get("title", url),
-                depth,
-            )
+            logger.info("[%d/%d] %s — %s (depth=%d)", count, config.max_pages or "∞", meta.get("type", "?"), meta.get("title", url), depth)
+        else:
+            logger.debug("No metadata on %s", url)
 
-        # Extract links for next level
+        # Extract links for next depth level
         if depth < config.max_depth:
-            from scrapling.parser import Selector
             sel = Selector(html)
-            links = set()
+            links: set[tuple[str, int]] = set()
             for a in sel.css("a[href]"):
                 href = a.css("::attr(href)").get()
                 if href:
                     abs_url = normalize_url(href.strip(), url)
-                    allowed2, _ = should_crawl(abs_url, config.allowed_domains)
-                    if allowed2 and abs_url not in visited:
+                    a2, _ = should_crawl(abs_url, config.allowed_domains)
+                    if a2 and abs_url not in visited:
                         links.add((abs_url, depth + 1))
-            queue.extend(links)
+            # Add with BFS ordering
+            existing = {u for u, _ in queue}
+            for link in links:
+                if link[0] not in existing:
+                    queue.append(link)
 
-        if count % 10 == 0 and count > 0:
-            logger.info("Progress: %d pages crawled, %d metadata items", len(visited), count)
+        if count > 0 and count % 25 == 0:
+            logger.info("Progress: %d pages visited, %d items extracted, %d queued", len(visited), count, len(queue))
 
     return count
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="WeCima Metadata Crawler — extract public metadata only",
+        description="WeCima Metadata Crawler — metadata-only, respects robots.txt",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
             "  python -m scraper.crawler\n"
-            "  python -m scraper.crawler --max-pages 50 --max-depth 2\n"
+            "  python -m scraper.crawler --max-pages 200 --max-depth 3 --verbose\n"
             "  python -m scraper.crawler --sitemap https://wecima.bid/sitemap.xml\n"
         ),
     )
-    parser.add_argument("--start-url", default=None, help="Start URL (default: https://wecima.bid)")
+    parser.add_argument("--start-url", default=None, help="Start URL")
     parser.add_argument("--max-pages", type=int, default=None, help="Max pages to crawl")
     parser.add_argument("--max-depth", type=int, default=None, help="Max crawl depth")
-    parser.add_argument("--delay", type=float, default=None, help="Base delay between requests (seconds)")
-    parser.add_argument("--sitemap", default=None, help="Sitemap URL instead of homepage crawl")
+    parser.add_argument("--delay", type=float, default=None, help="Base delay in seconds")
+    parser.add_argument("--sitemap", default=None, help="Sitemap URL")
     parser.add_argument("--output", default=None, help="Output JSONL path")
     parser.add_argument("--csv", default=None, help="Output CSV path")
-    parser.add_argument("--no-sqlite", action="store_true", help="Skip SQLite output")
+    parser.add_argument("--no-sqlite", action="store_true", help="Skip SQLite")
     parser.add_argument("--verbose", action="store_true", help="Debug logging")
 
     args = parser.parse_args()
-    cli_dict = {k: v for k, v in vars(args).items() if v is not None}
+    cli = {k: v for k, v in vars(args).items() if v is not None}
 
-    config = Config.from_env_and_args(cli_dict)
-    config.ensure_dirs()
-    setup_logging(config.verbose)
+    cfg = Config.from_env_and_args(cli)
+    cfg.ensure_dirs()
+    setup_logging(cfg.verbose)
 
     logger.info("=" * 60)
-    logger.info("WeCima Metadata Crawler")
-    logger.info("Target: %s", config.start_url)
-    logger.info("Max pages: %s, Max depth: %s", config.max_pages or "unlimited", config.max_depth or "unlimited")
+    logger.info("WeCima Metadata Crawler v1.0")
+    logger.info("Target: %s", cfg.start_url)
+    logger.info("Max pages: %s | Max depth: %s", cfg.max_pages or "unlimited", cfg.max_depth or "unlimited")
     logger.info("=" * 60)
 
-    # 1) Check robots.txt
-    checker = RobotsChecker(config.start_url)
+    # 1) Robots check
+    checker = RobotsChecker(cfg.start_url)
     checker.check()
     if not checker.is_allowed:
-        logger.error("robots.txt disallows crawling. Exiting.")
-        print("[BLOCKED] robots.txt disallows crawling on this site.")
+        logger.error("❌ robots.txt blocks crawling. Exiting.")
+        print("\n[BLOCKED] robots.txt disallows crawling on this site. Exiting.\n")
         sys.exit(1)
 
-    logger.info("robots.txt: OK (crawl-delay: %s)", checker.crawl_delay)
     if checker.crawl_delay:
-        config.delay_min = max(config.delay_min, checker.crawl_delay)
-        config.delay_max = max(config.delay_max, config.delay_min + 1)
+        cfg.delay_min = max(cfg.delay_min, checker.crawl_delay)
+        cfg.delay_max = max(cfg.delay_max, cfg.delay_min + 1)
+    logger.info("robots.txt: OK | delay: %.1f–%.1fs | sitemaps: %d", cfg.delay_min, cfg.delay_max, len(checker.sitemaps))
 
-    # 2) Initialize storage
-    storage = Storage(
-        config.output_jsonl,
-        config.output_csv,
-        config.output_sqlite,
-        config.no_sqlite,
-    )
+    # 2) Init storage
+    storage = Storage(cfg.output_jsonl, cfg.output_csv, cfg.output_sqlite, cfg.no_sqlite)
 
-    # 3) Start crawling
+    # 3) Crawl
     total = 0
-    sitemap_urls = []
+    sitemaps = []
 
-    if config.sitemap_url:
-        sitemap_urls = [config.sitemap_url]
+    if cfg.sitemap_url:
+        sitemaps = [cfg.sitemap_url]
     else:
-        sitemap_urls = checker.find_sitemap()
+        sitemaps = checker.find_sitemap()
 
-    if sitemap_urls:
-        logger.info("Using sitemap: %s", sitemap_urls[0])
-        total = crawl_sitemap(sitemap_urls, config, storage)
+    if sitemaps:
+        logger.info("Using sitemap: %s", sitemaps[0])
+        total = crawl_sitemap(sitemaps, cfg, storage)
     else:
-        logger.info("No sitemap found — crawling from homepage")
-        total = crawl_homepage(config, storage)
+        logger.info("No sitemap — BFS crawl from homepage")
+        total = crawl_bfs(cfg, storage)
 
-    # 4) Export CSV
+    # 4) CSV export
     storage.export_csv()
 
     # 5) Summary
-    from scraper.storage import Path as _Path
     logger.info("=" * 60)
-    logger.info("Crawl complete!")
-    logger.info("Items extracted: %d", storage.count)
-    logger.info("JSONL output: %s", _Path(config.output_jsonl).resolve())
-    logger.info("CSV output:   %s", _Path(config.output_csv).resolve())
-    if not config.no_sqlite:
-        logger.info("SQLite output: %s", _Path(config.output_sqlite).resolve())
+    logger.info("✅ Crawl complete!")
+    logger.info("   Items extracted: %d", storage.count)
+    logger.info("   JSONL: %s", Path(cfg.output_jsonl).resolve())
+    logger.info("   CSV:   %s", Path(cfg.output_csv).resolve())
+    if not cfg.no_sqlite:
+        logger.info("   SQLite: %s", Path(cfg.output_sqlite).resolve())
     logger.info("=" * 60)
 
 

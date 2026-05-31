@@ -2,4 +2,3 @@ scrapling>=0.4.8
 lxml>=6.1.0
 cssselect>=1.4.0
 orjson>=3.11.8
-aiofiles>=24.1.0
