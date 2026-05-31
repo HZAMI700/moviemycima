@@ -1,0 +1,10 @@
+# Ignore Python scraper — Vercel is for the Next.js frontend only
+scraper/
+data/
+tests/
+requirements.txt
+*.py
+**/__pycache__/
+*.pyc
+server/
+*.md

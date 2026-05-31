@@ -15,4 +15,5 @@ __pycache__/
 data/*.jsonl
 data/*.csv
 data/*.sqlite
+.vercel
 
