@@ -53,7 +53,11 @@ const movies = Array.from({ length: 24 }, (_, i) => ({
   duration: `${120 + Math.floor(Math.random() * 60)} دقيقة`,
   genres: [genres[i % genres.length], genres[(i + 3) % genres.length]].map(g => ({ ...g })),
   actors: [actors[i % actors.length], actors[(i + 2) % actors.length]].map(a => ({ ...a })),
-  embedLinks: ['https://www.youtube.com/embed/dQw4w9WgXcQ'],
+  embedLinks: [
+    'https://www.youtube.com/embed/6Bf6i_HK5So',
+    'https://www.youtube.com/embed/L3o1ViHhP1M',
+    'https://www.youtube.com/embed/8ea0W3KLbsE'
+  ],
   quality: ['HD', 'Full HD', '4K'][i % 3],
   language: 'عربية',
   views: Math.floor(Math.random() * 100000) + 10000,
@@ -90,7 +94,10 @@ series.forEach(s => {
     titleAr: `الحلقة ${i + 1}`,
     season: Math.floor(i / 4) + 1,
     episode: (i % 4) + 1,
-    embedLinks: ['https://www.youtube.com/embed/dQw4w9WgXcQ'],
+    embedLinks: [
+      'https://www.youtube.com/embed/6Bf6i_HK5So',
+      'https://www.youtube.com/embed/L3o1ViHhP1M'
+    ],
     thumbnail: posters[(i + s._id.length) % posters.length],
     duration: `${40 + Math.floor(Math.random() * 20)} دقيقة`,
     views: Math.floor(Math.random() * 50000),
